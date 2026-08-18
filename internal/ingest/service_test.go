@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/convin/webhook-ingest/internal/ingest"
+	"github.com/convin/webhook-ingest/internal/stats"
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
 
@@ -227,6 +228,106 @@ func TestRecordingWorkerRetriesLoggedFailureThenSucceeds(t *testing.T) {
 			t.Fatalf("logs do not contain %q: %s", want, logs)
 		}
 	}
+}
+
+func TestRecordingWorkerRecoversExpiredJobAfterRestart(t *testing.T) {
+	claimed := make(chan struct{})
+	var claimedOnce sync.Once
+	srv, st, firstService := testutil.NewIsolatedServerWithService(t,
+		ingest.WithRecordingProcessor(func(ctx context.Context, _ string) error {
+			claimedOnce.Do(func() { close(claimed) })
+			<-ctx.Done()
+			return ctx.Err()
+		}),
+	)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	if resp := post(t, srv.URL+"/webhooks/calls", eventJSON(eventID, callID, accountID)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	firstCtx, stopFirst := context.WithCancel(context.Background())
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		firstService.RunRecordingWorker(firstCtx, "first-instance")
+	}()
+	t.Cleanup(func() {
+		stopFirst()
+		<-firstDone
+	})
+
+	select {
+	case <-claimed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first service did not claim the recording job")
+	}
+	stopFirst()
+	<-firstDone
+
+	ctx := context.Background()
+	var processed, leaseActive bool
+	var jobs, attempts int
+	var leaseOwner string
+	if err := st.Pool().QueryRow(ctx, `
+		SELECT
+			(SELECT recording_processed FROM calls WHERE call_id = $1),
+			count(*),
+			min(attempts),
+			min(lease_owner),
+			bool_and(lease_expires_at > now())
+		FROM recording_jobs
+		WHERE call_id = $1
+	`, callID).Scan(&processed, &jobs, &attempts, &leaseOwner, &leaseActive); err != nil {
+		t.Fatalf("read abandoned job: %v", err)
+	}
+	if processed || jobs != 1 || attempts != 1 || leaseOwner != "first-instance" || !leaseActive {
+		t.Fatalf("abandoned job: processed=%t jobs=%d attempts=%d owner=%q active=%t",
+			processed, jobs, attempts, leaseOwner, leaseActive)
+	}
+
+	if _, err := st.Pool().Exec(ctx, `
+		UPDATE recording_jobs
+		SET lease_expires_at = now() - interval '1 second'
+		WHERE call_id = $1
+	`, callID); err != nil {
+		t.Fatalf("expire abandoned lease: %v", err)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	secondService := ingest.New(st, stats.NewCache(), nil, log,
+		ingest.WithRecordingProcessor(func(context.Context, string) error { return nil }),
+	)
+	secondCtx, stopSecond := context.WithCancel(context.Background())
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		secondService.RunRecordingWorker(secondCtx, "second-instance")
+	}()
+	t.Cleanup(func() {
+		stopSecond()
+		<-secondDone
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := st.Pool().QueryRow(ctx, `
+			SELECT
+				(SELECT recording_processed FROM calls WHERE call_id = $1),
+				(SELECT count(*) FROM recording_jobs WHERE call_id = $1)
+		`, callID).Scan(&processed, &jobs); err != nil {
+			t.Fatalf("read recovered job: %v", err)
+		}
+		if processed && jobs == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("second service did not recover job: processed=%t jobs=%d", processed, jobs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	stopSecond()
+	<-secondDone
 }
 
 func TestDuplicateDeliveryIsIgnored(t *testing.T) {
