@@ -1,10 +1,41 @@
 package stats_test
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/convin/webhook-ingest/internal/stats"
 )
+
+func TestCacheRecordConcurrent(t *testing.T) {
+	const (
+		workers          = 32
+		recordsPerWorker = 1_000
+	)
+
+	c := stats.NewCache()
+	var wg sync.WaitGroup
+	wg.Add(workers)
+
+	for worker := 0; worker < workers; worker++ {
+		durationSec := worker + 1
+		go func() {
+			defer wg.Done()
+			for range recordsPerWorker {
+				c.Record("acc_concurrent", durationSec)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	got := c.Get("acc_concurrent")
+	wantCallCount := int64(workers * recordsPerWorker)
+	wantTotalDuration := int64(recordsPerWorker * workers * (workers + 1) / 2)
+	if got.CallCount != wantCallCount || got.TotalDurationSec != wantTotalDuration {
+		t.Fatalf("got %+v, want CallCount=%d TotalDurationSec=%d", got, wantCallCount, wantTotalDuration)
+	}
+}
 
 func TestCacheRecordAccumulates(t *testing.T) {
 	c := stats.NewCache()
