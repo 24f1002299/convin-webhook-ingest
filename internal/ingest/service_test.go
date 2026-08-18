@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
@@ -89,6 +92,98 @@ func TestDuplicateDeliveryIsIgnored(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("stored %d copies of call %s, want 1", n, callID)
+	}
+
+	durable, err := st.AccountStats(ctx, accountID)
+	if err != nil {
+		t.Fatalf("AccountStats: %v", err)
+	}
+	if durable.CallCount != 1 || durable.TotalDurationSec != 143 {
+		t.Fatalf("durable stats: got %+v, want CallCount=1 TotalDurationSec=143", durable)
+	}
+
+	resp, err := http.Get(srv.URL + "/accounts/" + accountID + "/stats")
+	if err != nil {
+		t.Fatalf("get cached stats: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var cached struct {
+		CallCount        int64 `json:"call_count"`
+		TotalDurationSec int64 `json:"total_duration_sec"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&cached); err != nil {
+		t.Fatalf("decode cached stats: %v", err)
+	}
+	if cached.CallCount != 1 || cached.TotalDurationSec != 143 {
+		t.Fatalf("cached stats: got %+v, want CallCount=1 TotalDurationSec=143", cached)
+	}
+}
+
+func TestConcurrentDuplicateDeliveriesAreIdempotent(t *testing.T) {
+	const deliveries = 50
+
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	body := eventJSON(eventID, callID, accountID)
+
+	type result struct {
+		status int
+		err    error
+	}
+	results := make(chan result, deliveries)
+	start := make(chan struct{})
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	var wg sync.WaitGroup
+	wg.Add(deliveries)
+	for range deliveries {
+		go func() {
+			defer wg.Done()
+			<-start
+
+			resp, err := client.Post(
+				srv.URL+"/webhooks/calls",
+				"application/json",
+				strings.NewReader(body),
+			)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			results <- result{status: resp.StatusCode}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	delivery := 0
+	for got := range results {
+		delivery++
+		if got.err != nil {
+			t.Errorf("delivery %d: %v", delivery, got.err)
+			continue
+		}
+		if got.status != http.StatusOK {
+			t.Errorf("delivery %d: got %d, want 200", delivery, got.status)
+		}
+	}
+
+	ctx := context.Background()
+	var events, calls int
+	if err := st.Pool().QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM events WHERE event_id = $1),
+			(SELECT count(*) FROM calls WHERE call_id = $2)
+	`, eventID, callID).Scan(&events, &calls); err != nil {
+		t.Fatalf("count stored records: %v", err)
+	}
+	if events != 1 || calls != 1 {
+		t.Fatalf("stored records: got events=%d calls=%d, want events=1 calls=1", events, calls)
 	}
 
 	durable, err := st.AccountStats(ctx, accountID)
