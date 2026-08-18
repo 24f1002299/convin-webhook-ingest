@@ -153,30 +153,3 @@ func TestIngestEventRollsBackOnFailure(t *testing.T) {
 		t.Fatalf("stats changed after rollback: got %+v, want CallCount=7 TotalDurationSec=%d", got, maxInt64)
 	}
 }
-
-func TestIngestEventThenMarkRecordingProcessed(t *testing.T) {
-	s := testutil.NewStore(t)
-	eventID, callID, accountID := testutil.IDs(t, s)
-	ctx := context.Background()
-
-	evt := store.Event{
-		EventID: eventID, CallID: callID, AccountID: accountID,
-		Status: "completed", DurationSec: 10,
-		RecordingURL: "https://example.com/a.wav", Payload: []byte(`{}`),
-	}
-	if _, err := s.IngestEvent(ctx, evt); err != nil {
-		t.Fatalf("IngestEvent: %v", err)
-	}
-	if err := s.MarkRecordingProcessed(ctx, callID); err != nil {
-		t.Fatalf("MarkRecordingProcessed: %v", err)
-	}
-
-	var processed bool
-	row := s.Pool().QueryRow(ctx, `SELECT recording_processed FROM calls WHERE call_id = $1`, callID)
-	if err := row.Scan(&processed); err != nil {
-		t.Fatalf("scan: %v", err)
-	}
-	if !processed {
-		t.Fatal("expected recording_processed to be true")
-	}
-}

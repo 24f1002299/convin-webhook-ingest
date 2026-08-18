@@ -65,6 +65,59 @@ func TestWebhookStoresEventAndCall(t *testing.T) {
 	}
 }
 
+func TestRecordingWorkerProcessesJobAfterWebhookReturns(t *testing.T) {
+	srv, st, svc := testutil.NewIsolatedServerWithService(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	body := eventJSON(eventID, callID, accountID)
+	if resp := post(t, srv.URL+"/webhooks/calls", body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	var processed bool
+	var jobs int
+	if err := st.Pool().QueryRow(ctx, `
+		SELECT
+			(SELECT recording_processed FROM calls WHERE call_id = $1),
+			(SELECT count(*) FROM recording_jobs WHERE call_id = $1)
+	`, callID).Scan(&processed, &jobs); err != nil {
+		t.Fatalf("read queued recording: %v", err)
+	}
+	if processed || jobs != 1 {
+		t.Fatalf("before worker: processed=%t jobs=%d, want processed=false jobs=1", processed, jobs)
+	}
+
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		svc.RunRecordingWorker(workerCtx, "test-worker")
+	}()
+	t.Cleanup(func() {
+		cancelWorker()
+		<-workerDone
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := st.Pool().QueryRow(ctx, `
+			SELECT
+				(SELECT recording_processed FROM calls WHERE call_id = $1),
+				(SELECT count(*) FROM recording_jobs WHERE call_id = $1)
+		`, callID).Scan(&processed, &jobs); err != nil {
+			t.Fatalf("read recording progress: %v", err)
+		}
+		if processed && jobs == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recording was not processed: processed=%t jobs=%d", processed, jobs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestDuplicateDeliveryIsIgnored(t *testing.T) {
 	srv, st := testutil.NewServer(t)
 	eventID, callID, accountID := testutil.IDs(t, st)

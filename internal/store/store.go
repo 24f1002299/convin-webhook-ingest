@@ -130,14 +130,6 @@ func (s *Store) IngestEvent(ctx context.Context, e Event) (accepted bool, err er
 	return true, nil
 }
 
-// MarkRecordingProcessed flags the call's recording as handled.
-func (s *Store) MarkRecordingProcessed(ctx context.Context, callID string) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE calls SET recording_processed = TRUE, updated_at = now()
-		 WHERE call_id = $1`, callID)
-	return err
-}
-
 // AccountStats reads the durable aggregate. A missing account reads as zero.
 func (s *Store) AccountStats(ctx context.Context, accountID string) (Stats, error) {
 	var st Stats

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -41,6 +42,13 @@ func main() {
 
 	svc := ingest.New(st, stats.NewCache(), rdb, log)
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewRouter(svc, log)}
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	workerDone := make(chan struct{})
+	hostname, _ := os.Hostname()
+	go func() {
+		defer close(workerDone)
+		svc.RunRecordingWorker(workerCtx, fmt.Sprintf("%s:%d", hostname, os.Getpid()))
+	}()
 
 	go func() {
 		log.Info("listening", "addr", cfg.HTTPAddr)
@@ -60,4 +68,6 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown", "err", err)
 	}
+	cancelWorker()
+	<-workerDone
 }

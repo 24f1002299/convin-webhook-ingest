@@ -14,7 +14,11 @@ import (
 )
 
 // recordingWork stands in for downloading and transcoding a recording.
-const recordingWork = 50 * time.Millisecond
+const (
+	recordingWork         = 50 * time.Millisecond
+	recordingPollInterval = 25 * time.Millisecond
+	recordingLease        = 30 * time.Second
+)
 
 // Service ingests webhook deliveries.
 type Service struct {
@@ -34,8 +38,8 @@ func (s *Service) Stats(accountID string) stats.AccountStats {
 	return s.cache.Get(accountID)
 }
 
-// Ingest stores a delivery and kicks off processing. Processing runs
-// asynchronously so the provider gets a fast acknowledgement.
+// Ingest durably stores a delivery and its recording job. Recording processing
+// is independent of the request and is performed by RunRecordingWorker.
 func (s *Service) Ingest(ctx context.Context, evt Event) error {
 	payload, err := json.Marshal(evt)
 	if err != nil {
@@ -61,22 +65,48 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 		return nil
 	}
 	s.cache.Record(rec.AccountID, rec.DurationSec)
-
-	// Recordings are slow to fetch, so that part does not block the provider.
-	if rec.RecordingURL != "" {
-		go func() {
-			if err := s.processRecording(ctx, rec); err != nil {
-				// TODO: handle
-			}
-		}()
-	}
-
 	return nil
 }
 
-// processRecording downloads and transcodes the call recording, then marks
-// the call as done.
-func (s *Service) processRecording(ctx context.Context, rec store.Event) error {
-	time.Sleep(recordingWork)
-	return s.store.MarkRecordingProcessed(ctx, rec.CallID)
+// RunRecordingWorker polls durable jobs until ctx is canceled. Only one job is
+// processed at a time; multiple service instances safely share the queue via
+// leased claims in Store.
+func (s *Service) RunRecordingWorker(ctx context.Context, leaseOwner string) {
+	for {
+		job, found, err := s.store.ClaimRecordingJob(ctx, leaseOwner, recordingLease)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			s.log.Error("claim recording job", "err", err)
+		} else if found {
+			if err := s.processRecording(ctx, job); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				s.log.Error("process recording job", "call_id", job.CallID, "err", err)
+			}
+		}
+
+		timer := time.NewTimer(recordingPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+// processRecording stands in for downloading and transcoding one recording.
+func (s *Service) processRecording(ctx context.Context, job store.RecordingJob) error {
+	timer := time.NewTimer(recordingWork)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+	return s.store.CompleteRecordingJob(ctx, job)
 }

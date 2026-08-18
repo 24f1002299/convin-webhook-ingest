@@ -3,9 +3,15 @@ package testutil
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -61,9 +67,75 @@ func NewStore(t *testing.T) *store.Store {
 // Postgres and Redis, and returns it alongside the store for assertions.
 func NewServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	cfg := config.Load()
+	srv, s, _ := NewServerWithService(t)
+	return srv, s
+}
 
+// NewServerWithService also exposes the service so tests can control worker
+// lifecycle explicitly.
+func NewServerWithService(t *testing.T) (*httptest.Server, *store.Store, *ingest.Service) {
+	t.Helper()
 	s := NewStore(t)
+	return newServerWithService(t, s)
+}
+
+// NewIsolatedServerWithService creates a migration-complete schema owned by
+// this test. It is useful for workers that intentionally consume every ready
+// job and therefore must not share a queue with other test packages.
+func NewIsolatedServerWithService(t *testing.T) (*httptest.Server, *store.Store, *ingest.Service) {
+	t.Helper()
+	cfg := config.Load()
+	admin := NewStore(t)
+
+	random := make([]byte, 8)
+	if _, err := rand.Read(random); err != nil {
+		t.Fatalf("generate test schema name: %v", err)
+	}
+	schema := "test_" + hex.EncodeToString(random)
+	if _, err := admin.Pool().Exec(context.Background(), "CREATE SCHEMA "+schema); err != nil {
+		t.Fatalf("create test schema: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Pool().Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE"); err != nil {
+			t.Errorf("drop test schema: %v", err)
+		}
+	})
+
+	databaseURL, err := url.Parse(cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("parse database URL: %v", err)
+	}
+	query := databaseURL.Query()
+	query.Set("search_path", schema)
+	databaseURL.RawQuery = query.Encode()
+
+	s, err := store.New(context.Background(), databaseURL.String(), cfg.DBMaxConns)
+	if err != nil {
+		t.Fatalf("connect to isolated postgres schema: %v", err)
+	}
+	t.Cleanup(s.Close)
+
+	_, harnessFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate migrations directory")
+	}
+	migrationDir := filepath.Join(filepath.Dir(harnessFile), "..", "..", "migrations")
+	for _, name := range []string{"001_init.sql", "002_event_idempotency.sql", "003_recording_jobs.sql"} {
+		sql, err := os.ReadFile(filepath.Join(migrationDir, name))
+		if err != nil {
+			t.Fatalf("read migration %s: %v", name, err)
+		}
+		if _, err := s.Pool().Exec(context.Background(), string(sql)); err != nil {
+			t.Fatalf("execute migration %s: %v", name, err)
+		}
+	}
+
+	return newServerWithService(t, s)
+}
+
+func newServerWithService(t *testing.T, s *store.Store) (*httptest.Server, *store.Store, *ingest.Service) {
+	t.Helper()
+	cfg := config.Load()
 
 	rdb, err := redisclient.New(context.Background(), cfg.RedisAddr)
 	if err != nil {
@@ -76,5 +148,5 @@ func NewServer(t *testing.T) (*httptest.Server, *store.Store) {
 
 	srv := httptest.NewServer(httpapi.NewRouter(svc, log))
 	t.Cleanup(srv.Close)
-	return srv, s
+	return srv, s, svc
 }
