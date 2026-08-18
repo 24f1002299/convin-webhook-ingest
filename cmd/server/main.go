@@ -40,7 +40,11 @@ func main() {
 	}
 	defer func() { _ = rdb.Close() }()
 
-	svc := ingest.New(st, stats.NewCache(), rdb, log)
+	svc, err := ingest.New(ctx, st, stats.NewCache(), rdb, log)
+	if err != nil {
+		log.Error("hydrate account stats", "err", err)
+		os.Exit(1)
+	}
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewRouter(svc, log)}
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	workerDone := make(chan struct{})

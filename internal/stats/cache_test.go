@@ -61,3 +61,25 @@ func TestCacheGetUnknownAccountIsZero(t *testing.T) {
 		t.Fatalf("got %+v, want zero value", got)
 	}
 }
+
+func TestCacheReplaceSwapsCopiedSnapshots(t *testing.T) {
+	c := stats.NewCache()
+	c.Record("stale", 10)
+
+	replacement := map[string]stats.AccountStats{
+		"acc_1": {CallCount: 2, TotalDurationSec: 42},
+		"acc_2": {CallCount: 1, TotalDurationSec: 7},
+	}
+	c.Replace(replacement)
+	replacement["acc_1"] = stats.AccountStats{CallCount: 99, TotalDurationSec: 999}
+
+	if got := c.Get("acc_1"); got.CallCount != 2 || got.TotalDurationSec != 42 {
+		t.Fatalf("acc_1: got %+v, want CallCount=2 TotalDurationSec=42", got)
+	}
+	if got := c.Get("acc_2"); got.CallCount != 1 || got.TotalDurationSec != 7 {
+		t.Fatalf("acc_2: got %+v, want CallCount=1 TotalDurationSec=7", got)
+	}
+	if got := c.Get("stale"); got != (stats.AccountStats{}) {
+		t.Fatalf("stale account: got %+v, want zero value", got)
+	}
+}

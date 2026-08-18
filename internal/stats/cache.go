@@ -48,3 +48,16 @@ func (c *Cache) Record(accountID string, durationSec int) {
 	s.CallCount++
 	s.TotalDurationSec += int64(durationSec)
 }
+
+// Replace atomically swaps the cache contents with copied snapshots.
+func (c *Cache) Replace(all map[string]AccountStats) {
+	replacement := make(map[string]*AccountStats, len(all))
+	for accountID, stats := range all {
+		snapshot := stats
+		replacement[accountID] = &snapshot
+	}
+
+	c.mu.Lock()
+	c.m = replacement
+	c.mu.Unlock()
+}

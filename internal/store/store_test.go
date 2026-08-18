@@ -93,6 +93,31 @@ func TestIngestEventAccumulatesAccountStats(t *testing.T) {
 	}
 }
 
+func TestAllAccountStatsIncludesDurableTotals(t *testing.T) {
+	s := testutil.NewStore(t)
+	_, _, accountID := testutil.IDs(t, s)
+	ctx := context.Background()
+
+	if _, err := s.Pool().Exec(ctx, `
+		INSERT INTO account_stats (account_id, call_count, total_duration_sec)
+		VALUES ($1, 4, 321)
+	`, accountID); err != nil {
+		t.Fatalf("seed account stats: %v", err)
+	}
+
+	all, err := s.AllAccountStats(ctx)
+	if err != nil {
+		t.Fatalf("AllAccountStats: %v", err)
+	}
+	got, ok := all[accountID]
+	if !ok {
+		t.Fatalf("account %s missing from bulk result", accountID)
+	}
+	if got.CallCount != 4 || got.TotalDurationSec != 321 {
+		t.Fatalf("got %+v, want CallCount=4 TotalDurationSec=321", got)
+	}
+}
+
 func TestIngestEventRollsBackOnFailure(t *testing.T) {
 	const maxInt64 = int64(1<<63 - 1)
 

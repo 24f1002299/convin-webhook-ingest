@@ -294,9 +294,12 @@ func TestRecordingWorkerRecoversExpiredJobAfterRestart(t *testing.T) {
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	secondService := ingest.New(st, stats.NewCache(), nil, log,
+	secondService, err := ingest.New(ctx, st, stats.NewCache(), nil, log,
 		ingest.WithRecordingProcessor(func(context.Context, string) error { return nil }),
 	)
+	if err != nil {
+		t.Fatalf("construct second service: %v", err)
+	}
 	secondCtx, stopSecond := context.WithCancel(context.Background())
 	secondDone := make(chan struct{})
 	go func() {
@@ -328,6 +331,31 @@ func TestRecordingWorkerRecoversExpiredJobAfterRestart(t *testing.T) {
 
 	stopSecond()
 	<-secondDone
+}
+
+func TestNewServiceHydratesExistingDurableStats(t *testing.T) {
+	st := testutil.NewStore(t)
+	_, _, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	if _, err := st.Pool().Exec(ctx, `
+		INSERT INTO account_stats (account_id, call_count, total_duration_sec)
+		VALUES ($1, 6, 654)
+	`, accountID); err != nil {
+		t.Fatalf("seed durable stats: %v", err)
+	}
+
+	cache := stats.NewCache()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc, err := ingest.New(ctx, st, cache, nil, log)
+	if err != nil {
+		t.Fatalf("construct service: %v", err)
+	}
+
+	got := svc.Stats(accountID)
+	if got.CallCount != 6 || got.TotalDurationSec != 654 {
+		t.Fatalf("hydrated stats: got %+v, want CallCount=6 TotalDurationSec=654", got)
+	}
 }
 
 func TestDuplicateDeliveryIsIgnored(t *testing.T) {

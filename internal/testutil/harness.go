@@ -144,7 +144,10 @@ func newServerWithService(t *testing.T, s *store.Store, options ...ingest.Option
 	t.Cleanup(func() { _ = rdb.Close() })
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := ingest.New(s, stats.NewCache(), rdb, log, options...)
+	svc, err := ingest.New(context.Background(), s, stats.NewCache(), rdb, log, options...)
+	if err != nil {
+		t.Fatalf("construct service: %v", err)
+	}
 
 	srv := httptest.NewServer(httpapi.NewRouter(svc, log))
 	t.Cleanup(srv.Close)

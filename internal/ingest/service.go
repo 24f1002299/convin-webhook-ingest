@@ -57,8 +57,21 @@ type Service struct {
 	processor RecordingProcessor
 }
 
-// New builds a Service.
-func New(s *store.Store, c *stats.Cache, rdb *redis.Client, log *slog.Logger, options ...Option) *Service {
+// New builds a Service after restoring its cache from durable account totals.
+func New(ctx context.Context, s *store.Store, c *stats.Cache, rdb *redis.Client, log *slog.Logger, options ...Option) (*Service, error) {
+	durableStats, err := s.AllAccountStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cacheStats := make(map[string]stats.AccountStats, len(durableStats))
+	for accountID, durable := range durableStats {
+		cacheStats[accountID] = stats.AccountStats{
+			CallCount:        durable.CallCount,
+			TotalDurationSec: durable.TotalDurationSec,
+		}
+	}
+	c.Replace(cacheStats)
+
 	svc := &Service{
 		store:     s,
 		cache:     c,
@@ -69,7 +82,7 @@ func New(s *store.Store, c *stats.Cache, rdb *redis.Client, log *slog.Logger, op
 	for _, option := range options {
 		option(svc)
 	}
-	return svc
+	return svc, nil
 }
 
 // Stats returns the cached totals for an account.
