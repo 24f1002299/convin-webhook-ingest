@@ -18,7 +18,34 @@ const (
 	recordingWork         = 50 * time.Millisecond
 	recordingPollInterval = 25 * time.Millisecond
 	recordingLease        = 30 * time.Second
+	recordingRetryBase    = 500 * time.Millisecond
+	recordingRetryMax     = 30 * time.Second
 )
+
+// RecordingProcessor performs the external work for one recording URL.
+type RecordingProcessor func(context.Context, string) error
+
+// Option customizes a Service dependency.
+type Option func(*Service)
+
+// WithRecordingProcessor replaces the recording processor, primarily for
+// supplying the real downloader/transcoder or deterministic test failures.
+func WithRecordingProcessor(processor RecordingProcessor) Option {
+	return func(s *Service) {
+		if processor != nil {
+			s.processor = processor
+		}
+	}
+}
+
+// WithLogger replaces the service logger.
+func WithLogger(log *slog.Logger) Option {
+	return func(s *Service) {
+		if log != nil {
+			s.log = log
+		}
+	}
+}
 
 // Service ingests webhook deliveries.
 type Service struct {
@@ -26,11 +53,23 @@ type Service struct {
 	cache *stats.Cache
 	rdb   *redis.Client
 	log   *slog.Logger
+
+	processor RecordingProcessor
 }
 
 // New builds a Service.
-func New(s *store.Store, c *stats.Cache, rdb *redis.Client, log *slog.Logger) *Service {
-	return &Service{store: s, cache: c, rdb: rdb, log: log}
+func New(s *store.Store, c *stats.Cache, rdb *redis.Client, log *slog.Logger, options ...Option) *Service {
+	svc := &Service{
+		store:     s,
+		cache:     c,
+		rdb:       rdb,
+		log:       log,
+		processor: defaultRecordingProcessor,
+	}
+	for _, option := range options {
+		option(svc)
+	}
+	return svc
 }
 
 // Stats returns the cached totals for an account.
@@ -80,11 +119,34 @@ func (s *Service) RunRecordingWorker(ctx context.Context, leaseOwner string) {
 			}
 			s.log.Error("claim recording job", "err", err)
 		} else if found {
-			if err := s.processRecording(ctx, job); err != nil {
+			if err := s.processor(ctx, job.RecordingURL); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				s.log.Error("process recording job", "call_id", job.CallID, "err", err)
+
+				retryAt := time.Now().Add(recordingRetryDelay(job.Attempts))
+				retryErr := s.store.RetryRecordingJob(ctx, job, err.Error(), retryAt)
+				s.log.Error("recording processing failed",
+					"call_id", job.CallID,
+					"attempt", job.Attempts,
+					"error", err,
+				)
+				if retryErr != nil {
+					s.log.Error("schedule recording retry",
+						"call_id", job.CallID,
+						"attempt", job.Attempts,
+						"error", retryErr,
+					)
+				}
+			} else if err := s.store.CompleteRecordingJob(ctx, job); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				s.log.Error("complete recording job",
+					"call_id", job.CallID,
+					"attempt", job.Attempts,
+					"error", err,
+				)
 			}
 		}
 
@@ -98,8 +160,8 @@ func (s *Service) RunRecordingWorker(ctx context.Context, leaseOwner string) {
 	}
 }
 
-// processRecording stands in for downloading and transcoding one recording.
-func (s *Service) processRecording(ctx context.Context, job store.RecordingJob) error {
+// defaultRecordingProcessor stands in for downloading and transcoding.
+func defaultRecordingProcessor(ctx context.Context, _ string) error {
 	timer := time.NewTimer(recordingWork)
 	defer timer.Stop()
 
@@ -108,5 +170,19 @@ func (s *Service) processRecording(ctx context.Context, job store.RecordingJob) 
 		return ctx.Err()
 	case <-timer.C:
 	}
-	return s.store.CompleteRecordingJob(ctx, job)
+	return nil
+}
+
+func recordingRetryDelay(attempt int) time.Duration {
+	delay := recordingRetryBase
+	for current := 1; current < attempt; current++ {
+		if delay >= recordingRetryMax/2 {
+			return recordingRetryMax
+		}
+		delay *= 2
+	}
+	if delay > recordingRetryMax {
+		return recordingRetryMax
+	}
+	return delay
 }

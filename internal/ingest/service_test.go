@@ -1,16 +1,21 @@
 package ingest_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/convin/webhook-ingest/internal/ingest"
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
 
@@ -115,6 +120,112 @@ func TestRecordingWorkerProcessesJobAfterWebhookReturns(t *testing.T) {
 			t.Fatalf("recording was not processed: processed=%t jobs=%d", processed, jobs)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRecordingWorkerRetriesLoggedFailureThenSucceeds(t *testing.T) {
+	var logOutput bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logOutput, nil))
+	injectedFailure := errors.New("injected first-attempt failure")
+	allowSuccess := make(chan struct{})
+	var processorAttempts atomic.Int32
+
+	srv, st, svc := testutil.NewIsolatedServerWithService(t,
+		ingest.WithLogger(log),
+		ingest.WithRecordingProcessor(func(ctx context.Context, _ string) error {
+			attempt := processorAttempts.Add(1)
+			if attempt == 1 {
+				return injectedFailure
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-allowSuccess:
+				return nil
+			}
+		}),
+	)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	body := eventJSON(eventID, callID, accountID)
+	if resp := post(t, srv.URL+"/webhooks/calls", body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		svc.RunRecordingWorker(workerCtx, "retry-test-worker")
+	}()
+	t.Cleanup(func() {
+		cancelWorker()
+		<-workerDone
+	})
+
+	ctx := context.Background()
+	retryDeadline := time.Now().Add(2 * time.Second)
+	for {
+		var attempts int
+		var lastError string
+		var leaseReleased, scheduledLater bool
+		err := st.Pool().QueryRow(ctx, `
+			SELECT
+				attempts,
+				COALESCE(last_error, ''),
+				lease_owner IS NULL AND lease_expires_at IS NULL,
+				next_attempt_at > now()
+			FROM recording_jobs
+			WHERE call_id = $1
+		`, callID).Scan(&attempts, &lastError, &leaseReleased, &scheduledLater)
+		if err != nil {
+			t.Fatalf("read scheduled retry: %v", err)
+		}
+		if attempts == 1 && lastError == injectedFailure.Error() && leaseReleased && scheduledLater {
+			break
+		}
+		if time.Now().After(retryDeadline) {
+			t.Fatalf("retry was not persisted: attempts=%d last_error=%q released=%t scheduled=%t",
+				attempts, lastError, leaseReleased, scheduledLater)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	close(allowSuccess)
+	completionDeadline := time.Now().Add(2 * time.Second)
+	for {
+		var processed bool
+		var jobs int
+		if err := st.Pool().QueryRow(ctx, `
+			SELECT
+				(SELECT recording_processed FROM calls WHERE call_id = $1),
+				(SELECT count(*) FROM recording_jobs WHERE call_id = $1)
+		`, callID).Scan(&processed, &jobs); err != nil {
+			t.Fatalf("read retry progress: %v", err)
+		}
+		if processed && jobs == 0 {
+			break
+		}
+		if time.Now().After(completionDeadline) {
+			t.Fatalf("retry did not complete: processed=%t jobs=%d", processed, jobs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancelWorker()
+	<-workerDone
+	if got := processorAttempts.Load(); got != 2 {
+		t.Fatalf("processor attempts: got %d, want 2", got)
+	}
+	logs := logOutput.String()
+	for _, want := range []string{
+		"recording processing failed",
+		"call_id=" + callID,
+		"attempt=1",
+		injectedFailure.Error(),
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs do not contain %q: %s", want, logs)
+		}
 	}
 }
 

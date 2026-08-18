@@ -82,7 +82,7 @@ func NewServerWithService(t *testing.T) (*httptest.Server, *store.Store, *ingest
 // NewIsolatedServerWithService creates a migration-complete schema owned by
 // this test. It is useful for workers that intentionally consume every ready
 // job and therefore must not share a queue with other test packages.
-func NewIsolatedServerWithService(t *testing.T) (*httptest.Server, *store.Store, *ingest.Service) {
+func NewIsolatedServerWithService(t *testing.T, options ...ingest.Option) (*httptest.Server, *store.Store, *ingest.Service) {
 	t.Helper()
 	cfg := config.Load()
 	admin := NewStore(t)
@@ -130,10 +130,10 @@ func NewIsolatedServerWithService(t *testing.T) (*httptest.Server, *store.Store,
 		}
 	}
 
-	return newServerWithService(t, s)
+	return newServerWithService(t, s, options...)
 }
 
-func newServerWithService(t *testing.T, s *store.Store) (*httptest.Server, *store.Store, *ingest.Service) {
+func newServerWithService(t *testing.T, s *store.Store, options ...ingest.Option) (*httptest.Server, *store.Store, *ingest.Service) {
 	t.Helper()
 	cfg := config.Load()
 
@@ -144,7 +144,7 @@ func newServerWithService(t *testing.T, s *store.Store) (*httptest.Server, *stor
 	t.Cleanup(func() { _ = rdb.Close() })
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := ingest.New(s, stats.NewCache(), rdb, log)
+	svc := ingest.New(s, stats.NewCache(), rdb, log, options...)
 
 	srv := httptest.NewServer(httpapi.NewRouter(svc, log))
 	t.Cleanup(srv.Close)
