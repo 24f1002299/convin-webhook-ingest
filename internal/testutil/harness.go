@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/convin/webhook-ingest/internal/config"
@@ -21,6 +22,40 @@ import (
 	"github.com/convin/webhook-ingest/internal/stats"
 	"github.com/convin/webhook-ingest/internal/store"
 )
+
+// Worker owns a recording worker's cancellation and completion. Stop is safe
+// to call more than once, which lets tests stop a worker at a precise point
+// while still relying on test cleanup as a final safety net.
+type Worker struct {
+	cancel context.CancelFunc
+	done   <-chan struct{}
+	once   sync.Once
+}
+
+// StartWorker runs a service recording worker until the test ends or Stop is
+// called. Cleanup always waits for the goroutine to exit before stores close.
+func StartWorker(t *testing.T, svc *ingest.Service, owner string) *Worker {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.RunRecordingWorker(ctx, owner)
+	}()
+
+	worker := &Worker{cancel: cancel, done: done}
+	t.Cleanup(worker.Stop)
+	return worker
+}
+
+// Stop cancels the worker and waits for it to finish.
+func (w *Worker) Stop() {
+	w.once.Do(func() {
+		w.cancel()
+		<-w.done
+	})
+}
 
 // IDs returns event, call, and account identifiers unique to this test, and
 // removes any rows owned by them before the test runs and again afterwards.

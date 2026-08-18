@@ -94,16 +94,7 @@ func TestRecordingWorkerProcessesJobAfterWebhookReturns(t *testing.T) {
 		t.Fatalf("before worker: processed=%t jobs=%d, want processed=false jobs=1", processed, jobs)
 	}
 
-	workerCtx, cancelWorker := context.WithCancel(context.Background())
-	workerDone := make(chan struct{})
-	go func() {
-		defer close(workerDone)
-		svc.RunRecordingWorker(workerCtx, "test-worker")
-	}()
-	t.Cleanup(func() {
-		cancelWorker()
-		<-workerDone
-	})
+	testutil.StartWorker(t, svc, "test-worker")
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -152,16 +143,7 @@ func TestRecordingWorkerRetriesLoggedFailureThenSucceeds(t *testing.T) {
 		t.Fatalf("got %d, want 200", resp.StatusCode)
 	}
 
-	workerCtx, cancelWorker := context.WithCancel(context.Background())
-	workerDone := make(chan struct{})
-	go func() {
-		defer close(workerDone)
-		svc.RunRecordingWorker(workerCtx, "retry-test-worker")
-	}()
-	t.Cleanup(func() {
-		cancelWorker()
-		<-workerDone
-	})
+	worker := testutil.StartWorker(t, svc, "retry-test-worker")
 
 	ctx := context.Background()
 	retryDeadline := time.Now().Add(2 * time.Second)
@@ -212,8 +194,7 @@ func TestRecordingWorkerRetriesLoggedFailureThenSucceeds(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	cancelWorker()
-	<-workerDone
+	worker.Stop()
 	if got := processorAttempts.Load(); got != 2 {
 		t.Fatalf("processor attempts: got %d, want 2", got)
 	}
@@ -245,24 +226,14 @@ func TestRecordingWorkerRecoversExpiredJobAfterRestart(t *testing.T) {
 		t.Fatalf("got %d, want 200", resp.StatusCode)
 	}
 
-	firstCtx, stopFirst := context.WithCancel(context.Background())
-	firstDone := make(chan struct{})
-	go func() {
-		defer close(firstDone)
-		firstService.RunRecordingWorker(firstCtx, "first-instance")
-	}()
-	t.Cleanup(func() {
-		stopFirst()
-		<-firstDone
-	})
+	firstWorker := testutil.StartWorker(t, firstService, "first-instance")
 
 	select {
 	case <-claimed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("first service did not claim the recording job")
 	}
-	stopFirst()
-	<-firstDone
+	firstWorker.Stop()
 
 	ctx := context.Background()
 	var processed, leaseActive bool
@@ -300,16 +271,7 @@ func TestRecordingWorkerRecoversExpiredJobAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construct second service: %v", err)
 	}
-	secondCtx, stopSecond := context.WithCancel(context.Background())
-	secondDone := make(chan struct{})
-	go func() {
-		defer close(secondDone)
-		secondService.RunRecordingWorker(secondCtx, "second-instance")
-	}()
-	t.Cleanup(func() {
-		stopSecond()
-		<-secondDone
-	})
+	secondWorker := testutil.StartWorker(t, secondService, "second-instance")
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -329,8 +291,77 @@ func TestRecordingWorkerRecoversExpiredJobAfterRestart(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	stopSecond()
-	<-secondDone
+	secondWorker.Stop()
+}
+
+func TestIncidentAcceptanceDuplicateProcessingAndCacheRestoration(t *testing.T) {
+	srv, st, svc := testutil.NewIsolatedServerWithService(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+	body := eventJSON(eventID, callID, accountID)
+
+	for delivery := 1; delivery <= 3; delivery++ {
+		resp := post(t, srv.URL+"/webhooks/calls", body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("delivery %d: got %d, want 200", delivery, resp.StatusCode)
+		}
+	}
+
+	var events, calls, jobs int
+	var processed bool
+	if err := st.Pool().QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM events WHERE event_id = $1),
+			(SELECT count(*) FROM calls WHERE call_id = $2),
+			(SELECT count(*) FROM recording_jobs WHERE call_id = $2),
+			(SELECT recording_processed FROM calls WHERE call_id = $2)
+	`, eventID, callID).Scan(&events, &calls, &jobs, &processed); err != nil {
+		t.Fatalf("read accepted delivery: %v", err)
+	}
+	if events != 1 || calls != 1 || jobs != 1 || processed {
+		t.Fatalf("before worker: events=%d calls=%d jobs=%d processed=%t, want 1, 1, 1, false",
+			events, calls, jobs, processed)
+	}
+
+	durable, err := st.AccountStats(ctx, accountID)
+	if err != nil {
+		t.Fatalf("read durable stats: %v", err)
+	}
+	if durable.CallCount != 1 || durable.TotalDurationSec != 143 {
+		t.Fatalf("durable stats: got %+v, want CallCount=1 TotalDurationSec=143", durable)
+	}
+	if cached := svc.Stats(accountID); cached.CallCount != 1 || cached.TotalDurationSec != 143 {
+		t.Fatalf("live cache: got %+v, want CallCount=1 TotalDurationSec=143", cached)
+	}
+
+	worker := testutil.StartWorker(t, svc, "acceptance-worker")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := st.Pool().QueryRow(ctx, `
+			SELECT
+				(SELECT recording_processed FROM calls WHERE call_id = $1),
+				(SELECT count(*) FROM recording_jobs WHERE call_id = $1)
+		`, callID).Scan(&processed, &jobs); err != nil {
+			t.Fatalf("read recording progress: %v", err)
+		}
+		if processed && jobs == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recording was not processed: processed=%t jobs=%d", processed, jobs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	worker.Stop()
+
+	restoredCache := stats.NewCache()
+	restarted, err := ingest.New(ctx, st, restoredCache, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("restart service: %v", err)
+	}
+	if restored := restarted.Stats(accountID); restored.CallCount != 1 || restored.TotalDurationSec != 143 {
+		t.Fatalf("restored cache: got %+v, want CallCount=1 TotalDurationSec=143", restored)
+	}
 }
 
 func TestNewServiceHydratesExistingDurableStats(t *testing.T) {

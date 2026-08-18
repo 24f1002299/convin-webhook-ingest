@@ -47,8 +47,19 @@ func TestConcurrentRecordingJobClaimersGetDifferentJobs(t *testing.T) {
 		go func(claimer *store.Store, owner string) {
 			defer wg.Done()
 			<-start
-			job, found, err := claimer.ClaimRecordingJob(ctx, owner, time.Minute)
-			results <- claimResult{job: job, found: found, err: err}
+
+			// SKIP LOCKED may transiently see no candidate while every ready row
+			// is locked by another claimer. Poll as a real worker would, then
+			// assert that each lease ultimately belongs to a different job.
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				job, found, err := claimer.ClaimRecordingJob(ctx, owner, time.Minute)
+				if err != nil || found || time.Now().After(deadline) {
+					results <- claimResult{job: job, found: found, err: err}
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
 		}(claimer, owner)
 	}
 
