@@ -15,7 +15,7 @@ import (
 )
 
 func TestRunShutsDownPromptlyAndPreservesPendingJobs(t *testing.T) {
-	seedStore := testutil.NewStore(t)
+	seedStore, databaseURL := testutil.NewIsolatedStore(t)
 	eventID, callID, accountID := testutil.IDs(t, seedStore)
 	databaseCtx := context.Background()
 
@@ -50,6 +50,7 @@ func TestRunShutsDownPromptlyAndPreservesPendingJobs(t *testing.T) {
 
 	cfg := config.Load()
 	cfg.HTTPAddr = address
+	cfg.PostgresDSN = databaseURL
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	runCtx, stopRun := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)

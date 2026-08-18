@@ -89,7 +89,15 @@ func IDs(t *testing.T, s *store.Store) (eventID, callID, accountID string) {
 func NewStore(t *testing.T) *store.Store {
 	t.Helper()
 	cfg := config.Load()
-	s, err := store.New(context.Background(), cfg.PostgresDSN, cfg.DBMaxConns)
+	return NewStoreWithDSN(t, cfg.PostgresDSN)
+}
+
+// NewStoreWithDSN opens a store against a specific database connection string
+// and closes it when the test finishes.
+func NewStoreWithDSN(t *testing.T, databaseURL string) *store.Store {
+	t.Helper()
+	cfg := config.Load()
+	s, err := store.New(context.Background(), databaseURL, cfg.DBMaxConns)
 	if err != nil {
 		t.Fatalf("connect to postgres (is `docker compose up` running?): %v", err)
 	}
@@ -97,11 +105,11 @@ func NewStore(t *testing.T) *store.Store {
 	return s
 }
 
-// NewServer starts an in-process HTTP server backed by the configured
-// Postgres and returns it alongside the store for assertions.
+// NewServer starts an in-process HTTP server backed by an isolated Postgres
+// schema and returns it alongside the store for assertions.
 func NewServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	srv, s, _ := NewServerWithService(t)
+	srv, s, _ := NewIsolatedServerWithService(t)
 	return srv, s
 }
 
@@ -109,14 +117,13 @@ func NewServer(t *testing.T) (*httptest.Server, *store.Store) {
 // lifecycle explicitly.
 func NewServerWithService(t *testing.T) (*httptest.Server, *store.Store, *ingest.Service) {
 	t.Helper()
-	s := NewStore(t)
-	return newServerWithService(t, s)
+	return NewIsolatedServerWithService(t)
 }
 
-// NewIsolatedServerWithService creates a migration-complete schema owned by
-// this test. It is useful for workers that intentionally consume every ready
-// job and therefore must not share a queue with other test packages.
-func NewIsolatedServerWithService(t *testing.T, options ...ingest.Option) (*httptest.Server, *store.Store, *ingest.Service) {
+// NewIsolatedStore creates a migration-complete schema owned by this test and
+// returns both its store and connection string. Worker tests use it to avoid
+// consuming jobs from a concurrently running service or another test package.
+func NewIsolatedStore(t *testing.T) (*store.Store, string) {
 	t.Helper()
 	cfg := config.Load()
 	admin := NewStore(t)
@@ -143,11 +150,7 @@ func NewIsolatedServerWithService(t *testing.T, options ...ingest.Option) (*http
 	query.Set("search_path", schema)
 	databaseURL.RawQuery = query.Encode()
 
-	s, err := store.New(context.Background(), databaseURL.String(), cfg.DBMaxConns)
-	if err != nil {
-		t.Fatalf("connect to isolated postgres schema: %v", err)
-	}
-	t.Cleanup(s.Close)
+	s := NewStoreWithDSN(t, databaseURL.String())
 
 	_, harnessFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -164,6 +167,15 @@ func NewIsolatedServerWithService(t *testing.T, options ...ingest.Option) (*http
 		}
 	}
 
+	return s, databaseURL.String()
+
+}
+
+// NewIsolatedServerWithService creates an HTTP server backed by an isolated,
+// migration-complete schema.
+func NewIsolatedServerWithService(t *testing.T, options ...ingest.Option) (*httptest.Server, *store.Store, *ingest.Service) {
+	t.Helper()
+	s, _ := NewIsolatedStore(t)
 	return newServerWithService(t, s, options...)
 }
 

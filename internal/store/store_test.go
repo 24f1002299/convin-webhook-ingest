@@ -9,7 +9,7 @@ import (
 )
 
 func TestIngestEventPersistsAllEffects(t *testing.T) {
-	s := testutil.NewStore(t)
+	s, _ := testutil.NewIsolatedStore(t)
 	eventID, callID, accountID := testutil.IDs(t, s)
 	ctx := context.Background()
 
@@ -71,7 +71,7 @@ func TestIngestEventPersistsAllEffects(t *testing.T) {
 }
 
 func TestIngestEventAccumulatesAccountStats(t *testing.T) {
-	s := testutil.NewStore(t)
+	s, _ := testutil.NewIsolatedStore(t)
 	eventID, callID, accountID := testutil.IDs(t, s)
 	ctx := context.Background()
 
@@ -94,7 +94,7 @@ func TestIngestEventAccumulatesAccountStats(t *testing.T) {
 }
 
 func TestAllAccountStatsIncludesDurableTotals(t *testing.T) {
-	s := testutil.NewStore(t)
+	s, _ := testutil.NewIsolatedStore(t)
 	_, _, accountID := testutil.IDs(t, s)
 	ctx := context.Background()
 
@@ -121,7 +121,7 @@ func TestAllAccountStatsIncludesDurableTotals(t *testing.T) {
 func TestIngestEventRollsBackOnFailure(t *testing.T) {
 	const maxInt64 = int64(1<<63 - 1)
 
-	s := testutil.NewStore(t)
+	s, _ := testutil.NewIsolatedStore(t)
 	eventID, callID, accountID := testutil.IDs(t, s)
 	ctx := context.Background()
 

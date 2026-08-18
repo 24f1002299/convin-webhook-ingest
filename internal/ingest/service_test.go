@@ -365,7 +365,7 @@ func TestIncidentAcceptanceDuplicateProcessingAndCacheRestoration(t *testing.T) 
 }
 
 func TestNewServiceHydratesExistingDurableStats(t *testing.T) {
-	st := testutil.NewStore(t)
+	st, _ := testutil.NewIsolatedStore(t)
 	_, _, accountID := testutil.IDs(t, st)
 	ctx := context.Background()
 

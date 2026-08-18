@@ -15,9 +15,9 @@ import (
 func TestConcurrentRecordingJobClaimersGetDifferentJobs(t *testing.T) {
 	const jobCount = 10
 
-	firstStore := testutil.NewStore(t)
+	firstStore, databaseURL := testutil.NewIsolatedStore(t)
 	eventID, callID, accountID := testutil.IDs(t, firstStore)
-	secondStore := testutil.NewStore(t)
+	secondStore := testutil.NewStoreWithDSN(t, databaseURL)
 	ctx := context.Background()
 
 	for i := 0; i < jobCount; i++ {
@@ -88,7 +88,7 @@ func TestConcurrentRecordingJobClaimersGetDifferentJobs(t *testing.T) {
 }
 
 func TestExpiredRecordingJobLeaseCanBeReclaimed(t *testing.T) {
-	s := testutil.NewStore(t)
+	s, _ := testutil.NewIsolatedStore(t)
 	eventID, callID, accountID := testutil.IDs(t, s)
 	ctx := context.Background()
 	seedRecordingJob(t, ctx, s, eventID, callID, accountID)
@@ -118,7 +118,7 @@ func TestExpiredRecordingJobLeaseCanBeReclaimed(t *testing.T) {
 }
 
 func TestRetryAndCompleteRecordingJob(t *testing.T) {
-	s := testutil.NewStore(t)
+	s, _ := testutil.NewIsolatedStore(t)
 	eventID, callID, accountID := testutil.IDs(t, s)
 	ctx := context.Background()
 	seedRecordingJob(t, ctx, s, eventID, callID, accountID)
