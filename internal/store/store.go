@@ -81,11 +81,16 @@ func (s *Store) IngestEvent(ctx context.Context, e Event) (accepted bool, err er
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx,
+	inserted, err := tx.Exec(ctx,
 		`INSERT INTO events (event_id, call_id, account_id, payload)
-		 VALUES ($1, $2, $3, $4)`,
-		e.EventID, e.CallID, e.AccountID, e.Payload); err != nil {
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (event_id) DO NOTHING`,
+		e.EventID, e.CallID, e.AccountID, e.Payload)
+	if err != nil {
 		return false, err
+	}
+	if inserted.RowsAffected() == 0 {
+		return false, nil
 	}
 
 	if _, err := tx.Exec(ctx,

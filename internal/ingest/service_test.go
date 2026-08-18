@@ -2,6 +2,7 @@ package ingest_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -80,5 +81,38 @@ func TestDuplicateDeliveryIsIgnored(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("stored %d copies of %s, want 1", n, eventID)
+	}
+
+	row = st.Pool().QueryRow(ctx, `SELECT count(*) FROM calls WHERE call_id = $1`, callID)
+	if err := row.Scan(&n); err != nil {
+		t.Fatalf("count calls: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("stored %d copies of call %s, want 1", n, callID)
+	}
+
+	durable, err := st.AccountStats(ctx, accountID)
+	if err != nil {
+		t.Fatalf("AccountStats: %v", err)
+	}
+	if durable.CallCount != 1 || durable.TotalDurationSec != 143 {
+		t.Fatalf("durable stats: got %+v, want CallCount=1 TotalDurationSec=143", durable)
+	}
+
+	resp, err := http.Get(srv.URL + "/accounts/" + accountID + "/stats")
+	if err != nil {
+		t.Fatalf("get cached stats: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var cached struct {
+		CallCount        int64 `json:"call_count"`
+		TotalDurationSec int64 `json:"total_duration_sec"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&cached); err != nil {
+		t.Fatalf("decode cached stats: %v", err)
+	}
+	if cached.CallCount != 1 || cached.TotalDurationSec != 143 {
+		t.Fatalf("cached stats: got %+v, want CallCount=1 TotalDurationSec=143", cached)
 	}
 }
