@@ -10,7 +10,6 @@ import (
 type Config struct {
 	HTTPAddr    string
 	PostgresDSN string
-	RedisAddr   string
 	// DBMaxConns bounds the Postgres connection pool.
 	DBMaxConns int32
 }
@@ -21,7 +20,6 @@ func Load() Config {
 	return Config{
 		HTTPAddr:    env("HTTP_ADDR", ":8080"),
 		PostgresDSN: env("DATABASE_URL", "postgres://webhook:webhook@localhost:5432/webhook?sslmode=disable"),
-		RedisAddr:   env("REDIS_ADDR", "localhost:6379"),
 		DBMaxConns:  int32(envInt("DB_MAX_CONNS", 20)),
 	}
 }

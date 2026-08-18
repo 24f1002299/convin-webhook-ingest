@@ -294,7 +294,7 @@ func TestRecordingWorkerRecoversExpiredJobAfterRestart(t *testing.T) {
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	secondService, err := ingest.New(ctx, st, stats.NewCache(), nil, log,
+	secondService, err := ingest.New(ctx, st, stats.NewCache(), log,
 		ingest.WithRecordingProcessor(func(context.Context, string) error { return nil }),
 	)
 	if err != nil {
@@ -347,7 +347,7 @@ func TestNewServiceHydratesExistingDurableStats(t *testing.T) {
 
 	cache := stats.NewCache()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc, err := ingest.New(ctx, st, cache, nil, log)
+	svc, err := ingest.New(ctx, st, cache, log)
 	if err != nil {
 		t.Fatalf("construct service: %v", err)
 	}

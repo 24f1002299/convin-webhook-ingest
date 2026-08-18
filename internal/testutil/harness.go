@@ -18,7 +18,6 @@ import (
 	"github.com/convin/webhook-ingest/internal/config"
 	"github.com/convin/webhook-ingest/internal/httpapi"
 	"github.com/convin/webhook-ingest/internal/ingest"
-	"github.com/convin/webhook-ingest/internal/redisclient"
 	"github.com/convin/webhook-ingest/internal/stats"
 	"github.com/convin/webhook-ingest/internal/store"
 )
@@ -64,7 +63,7 @@ func NewStore(t *testing.T) *store.Store {
 }
 
 // NewServer starts an in-process HTTP server backed by the configured
-// Postgres and Redis, and returns it alongside the store for assertions.
+// Postgres and returns it alongside the store for assertions.
 func NewServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
 	srv, s, _ := NewServerWithService(t)
@@ -135,16 +134,8 @@ func NewIsolatedServerWithService(t *testing.T, options ...ingest.Option) (*http
 
 func newServerWithService(t *testing.T, s *store.Store, options ...ingest.Option) (*httptest.Server, *store.Store, *ingest.Service) {
 	t.Helper()
-	cfg := config.Load()
-
-	rdb, err := redisclient.New(context.Background(), cfg.RedisAddr)
-	if err != nil {
-		t.Fatalf("connect to redis (is `docker compose up` running?): %v", err)
-	}
-	t.Cleanup(func() { _ = rdb.Close() })
-
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc, err := ingest.New(context.Background(), s, stats.NewCache(), rdb, log, options...)
+	svc, err := ingest.New(context.Background(), s, stats.NewCache(), log, options...)
 	if err != nil {
 		t.Fatalf("construct service: %v", err)
 	}

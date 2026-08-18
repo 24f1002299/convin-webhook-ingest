@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/convin/webhook-ingest/internal/stats"
 	"github.com/convin/webhook-ingest/internal/store"
 )
@@ -51,14 +49,13 @@ func WithLogger(log *slog.Logger) Option {
 type Service struct {
 	store *store.Store
 	cache *stats.Cache
-	rdb   *redis.Client
 	log   *slog.Logger
 
 	processor RecordingProcessor
 }
 
 // New builds a Service after restoring its cache from durable account totals.
-func New(ctx context.Context, s *store.Store, c *stats.Cache, rdb *redis.Client, log *slog.Logger, options ...Option) (*Service, error) {
+func New(ctx context.Context, s *store.Store, c *stats.Cache, log *slog.Logger, options ...Option) (*Service, error) {
 	durableStats, err := s.AllAccountStats(ctx)
 	if err != nil {
 		return nil, err
@@ -75,7 +72,6 @@ func New(ctx context.Context, s *store.Store, c *stats.Cache, rdb *redis.Client,
 	svc := &Service{
 		store:     s,
 		cache:     c,
-		rdb:       rdb,
 		log:       log,
 		processor: defaultRecordingProcessor,
 	}
