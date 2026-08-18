@@ -106,6 +106,15 @@ func (s *Store) IngestEvent(ctx context.Context, e Event) (accepted bool, err er
 	}
 
 	if _, err := tx.Exec(ctx,
+		`INSERT INTO recording_jobs (call_id)
+		 SELECT $1
+		 WHERE $2 <> ''
+		 ON CONFLICT (call_id) DO NOTHING`,
+		e.CallID, e.RecordingURL); err != nil {
+		return false, err
+	}
+
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO account_stats (account_id, call_count, total_duration_sec)
 		 VALUES ($1, 1, $2)
 		 ON CONFLICT (account_id) DO UPDATE SET

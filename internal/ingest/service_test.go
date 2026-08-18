@@ -94,6 +94,14 @@ func TestDuplicateDeliveryIsIgnored(t *testing.T) {
 		t.Fatalf("stored %d copies of call %s, want 1", n, callID)
 	}
 
+	row = st.Pool().QueryRow(ctx, `SELECT count(*) FROM recording_jobs WHERE call_id = $1`, callID)
+	if err := row.Scan(&n); err != nil {
+		t.Fatalf("count recording jobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("stored %d recording jobs for %s, want 1", n, callID)
+	}
+
 	durable, err := st.AccountStats(ctx, accountID)
 	if err != nil {
 		t.Fatalf("AccountStats: %v", err)
@@ -174,16 +182,17 @@ func TestConcurrentDuplicateDeliveriesAreIdempotent(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	var events, calls int
+	var events, calls, jobs int
 	if err := st.Pool().QueryRow(ctx, `
 		SELECT
 			(SELECT count(*) FROM events WHERE event_id = $1),
-			(SELECT count(*) FROM calls WHERE call_id = $2)
-	`, eventID, callID).Scan(&events, &calls); err != nil {
+			(SELECT count(*) FROM calls WHERE call_id = $2),
+			(SELECT count(*) FROM recording_jobs WHERE call_id = $2)
+	`, eventID, callID).Scan(&events, &calls, &jobs); err != nil {
 		t.Fatalf("count stored records: %v", err)
 	}
-	if events != 1 || calls != 1 {
-		t.Fatalf("stored records: got events=%d calls=%d, want events=1 calls=1", events, calls)
+	if events != 1 || calls != 1 || jobs != 1 {
+		t.Fatalf("stored records: got events=%d calls=%d jobs=%d, want events=1 calls=1 jobs=1", events, calls, jobs)
 	}
 
 	durable, err := st.AccountStats(ctx, accountID)

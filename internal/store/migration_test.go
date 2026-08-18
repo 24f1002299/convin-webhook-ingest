@@ -80,6 +80,68 @@ func TestEventIdempotencyMigration(t *testing.T) {
 	}
 }
 
+func TestRecordingJobsMigrationBackfillsPendingRecordings(t *testing.T) {
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, config.Load().PostgresDSN)
+	if err != nil {
+		t.Fatalf("connect to postgres (is `docker compose up` running?): %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(ctx) })
+
+	if _, err := conn.Exec(ctx, `SET search_path TO pg_temp`); err != nil {
+		t.Fatalf("use temporary schema: %v", err)
+	}
+	execMigrationFile(t, ctx, conn, "../../migrations/001_init.sql")
+	execMigrationFile(t, ctx, conn, "../../migrations/002_event_idempotency.sql")
+
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO calls (
+			call_id, account_id, status, duration_sec, recording_url, recording_processed
+		) VALUES
+			('call_pending', 'acc_1', 'completed', 10, 'https://example.com/pending.wav', FALSE),
+			('call_processed', 'acc_1', 'completed', 20, 'https://example.com/done.wav', TRUE),
+			('call_without_url', 'acc_1', 'completed', 30, NULL, FALSE),
+			('call_with_empty_url', 'acc_1', 'completed', 40, '', FALSE)
+	`); err != nil {
+		t.Fatalf("seed calls: %v", err)
+	}
+
+	execMigrationFile(t, ctx, conn, "../../migrations/003_recording_jobs.sql")
+
+	var (
+		callID          string
+		attempts        int
+		ready           bool
+		ownerIsNull     bool
+		leaseIsNull     bool
+		lastErrorIsNull bool
+	)
+	if err := conn.QueryRow(ctx, `
+		SELECT
+			call_id,
+			attempts,
+			next_attempt_at <= now(),
+			lease_owner IS NULL,
+			lease_expires_at IS NULL,
+			last_error IS NULL
+		FROM recording_jobs
+	`).Scan(&callID, &attempts, &ready, &ownerIsNull, &leaseIsNull, &lastErrorIsNull); err != nil {
+		t.Fatalf("read backfilled job: %v", err)
+	}
+	if callID != "call_pending" || attempts != 0 || !ready || !ownerIsNull || !leaseIsNull || !lastErrorIsNull {
+		t.Fatalf("unexpected backfilled job state: call_id=%q attempts=%d ready=%t owner_null=%t lease_null=%t last_error_null=%t",
+			callID, attempts, ready, ownerIsNull, leaseIsNull, lastErrorIsNull)
+	}
+
+	var jobs int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM recording_jobs`).Scan(&jobs); err != nil {
+		t.Fatalf("count backfilled jobs: %v", err)
+	}
+	if jobs != 1 {
+		t.Fatalf("backfilled jobs: got %d, want 1", jobs)
+	}
+}
+
 func execMigrationFile(t *testing.T, ctx context.Context, conn *pgx.Conn, path string) {
 	t.Helper()
 	sql, err := os.ReadFile(path)

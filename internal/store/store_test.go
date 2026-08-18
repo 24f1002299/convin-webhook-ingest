@@ -15,7 +15,8 @@ func TestIngestEventPersistsAllEffects(t *testing.T) {
 
 	evt := store.Event{
 		EventID: eventID, CallID: callID, AccountID: accountID,
-		Status: "completed", DurationSec: 10, Payload: []byte(`{}`),
+		Status: "completed", DurationSec: 10,
+		RecordingURL: "https://example.com/a.wav", Payload: []byte(`{}`),
 	}
 
 	exists, err := s.EventExists(ctx, eventID)
@@ -49,6 +50,15 @@ func TestIngestEventPersistsAllEffects(t *testing.T) {
 	}
 	if storedAccount != accountID {
 		t.Fatalf("call account: got %q, want %q", storedAccount, accountID)
+	}
+
+	var jobs int
+	if err := s.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM recording_jobs WHERE call_id = $1`, callID).Scan(&jobs); err != nil {
+		t.Fatalf("count recording jobs: %v", err)
+	}
+	if jobs != 1 {
+		t.Fatalf("recording jobs: got %d, want 1", jobs)
 	}
 
 	got, err := s.AccountStats(ctx, accountID)
@@ -99,7 +109,8 @@ func TestIngestEventRollsBackOnFailure(t *testing.T) {
 
 	accepted, err := s.IngestEvent(ctx, store.Event{
 		EventID: eventID, CallID: callID, AccountID: accountID,
-		Status: "completed", DurationSec: 1, Payload: []byte(`{}`),
+		Status: "completed", DurationSec: 1,
+		RecordingURL: "https://example.com/rollback.wav", Payload: []byte(`{}`),
 	})
 	if err == nil {
 		t.Fatal("IngestEvent: got nil error, want aggregate overflow")
@@ -123,6 +134,15 @@ func TestIngestEventRollsBackOnFailure(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("call rows: got %d, want 0", calls)
+	}
+
+	var jobs int
+	if err := s.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM recording_jobs WHERE call_id = $1`, callID).Scan(&jobs); err != nil {
+		t.Fatalf("count recording jobs: %v", err)
+	}
+	if jobs != 0 {
+		t.Fatalf("recording job rows: got %d, want 0", jobs)
 	}
 
 	got, statsErr := s.AccountStats(ctx, accountID)
