@@ -72,18 +72,23 @@ func (s *Store) EventExists(ctx context.Context, eventID string) (bool, error) {
 	return true, nil
 }
 
-// InsertEvent stores the raw delivery.
-func (s *Store) InsertEvent(ctx context.Context, e Event) error {
-	_, err := s.pool.Exec(ctx,
+// IngestEvent atomically stores an event and applies its call and aggregate
+// effects. accepted is true only after the transaction commits.
+func (s *Store) IngestEvent(ctx context.Context, e Event) (accepted bool, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO events (event_id, call_id, account_id, payload)
 		 VALUES ($1, $2, $3, $4)`,
-		e.EventID, e.CallID, e.AccountID, e.Payload)
-	return err
-}
+		e.EventID, e.CallID, e.AccountID, e.Payload); err != nil {
+		return false, err
+	}
 
-// UpsertCall creates or refreshes the call record for this event.
-func (s *Store) UpsertCall(ctx context.Context, e Event) error {
-	_, err := s.pool.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO calls (call_id, account_id, status, duration_sec, recording_url, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, now())
 		 ON CONFLICT (call_id) DO UPDATE SET
@@ -91,8 +96,24 @@ func (s *Store) UpsertCall(ctx context.Context, e Event) error {
 		     duration_sec  = EXCLUDED.duration_sec,
 		     recording_url = EXCLUDED.recording_url,
 		     updated_at    = now()`,
-		e.CallID, e.AccountID, e.Status, e.DurationSec, e.RecordingURL)
-	return err
+		e.CallID, e.AccountID, e.Status, e.DurationSec, e.RecordingURL); err != nil {
+		return false, err
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO account_stats (account_id, call_count, total_duration_sec)
+		 VALUES ($1, 1, $2)
+		 ON CONFLICT (account_id) DO UPDATE SET
+		     call_count         = account_stats.call_count + 1,
+		     total_duration_sec = account_stats.total_duration_sec + EXCLUDED.total_duration_sec`,
+		e.AccountID, e.DurationSec); err != nil {
+		return false, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // MarkRecordingProcessed flags the call's recording as handled.
@@ -100,18 +121,6 @@ func (s *Store) MarkRecordingProcessed(ctx context.Context, callID string) error
 	_, err := s.pool.Exec(ctx,
 		`UPDATE calls SET recording_processed = TRUE, updated_at = now()
 		 WHERE call_id = $1`, callID)
-	return err
-}
-
-// IncrementAccountStats folds one completed call into the durable aggregate.
-func (s *Store) IncrementAccountStats(ctx context.Context, accountID string, durationSec int) error {
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO account_stats (account_id, call_count, total_duration_sec)
-		 VALUES ($1, 1, $2)
-		 ON CONFLICT (account_id) DO UPDATE SET
-		     call_count         = account_stats.call_count + 1,
-		     total_duration_sec = account_stats.total_duration_sec + EXCLUDED.total_duration_sec`,
-		accountID, durationSec)
 	return err
 }
 

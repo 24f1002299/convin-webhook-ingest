@@ -61,14 +61,13 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 		OccurredAt:   evt.OccurredAt,
 		Payload:      payload,
 	}
-	if err := s.store.InsertEvent(ctx, rec); err != nil {
+	accepted, err := s.store.IngestEvent(ctx, rec)
+	if err != nil {
 		return err
 	}
-	if err := s.store.UpsertCall(ctx, rec); err != nil {
-		return err
-	}
-	if err := s.store.IncrementAccountStats(ctx, rec.AccountID, rec.DurationSec); err != nil {
-		return err
+	if !accepted {
+		s.log.Info("duplicate delivery ignored", "event_id", evt.EventID)
+		return nil
 	}
 	s.cache.Record(rec.AccountID, rec.DurationSec)
 
